@@ -1,0 +1,5 @@
+{
+  "NumberOfQuestions": 36,
+  "HasWarmUpQuestion": true,
+  "Teams": ["TeamA", "TeamB"]
+}
