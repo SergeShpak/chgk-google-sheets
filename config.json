@@ -1,5 +1,6 @@
 {
-  "NumberOfQuestions": 36,
+  "GameName": "own-game",
+  "NumberOfQuestions": 41,
   "HasWarmUpQuestion": true,
   "Teams": ["TeamA", "TeamB"]
 }

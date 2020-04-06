@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
 type Config struct {
+	GameName          string
 	NumberOfQuestions int
 	HasWarmUpQuestion bool
 	Teams             []string
@@ -24,6 +26,9 @@ func ParseJSONConfig(file string) (*Config, error) {
 	var c Config
 	if err := json.NewDecoder(f).Decode(&c); err != nil {
 		return nil, err
+	}
+	if len(c.GameName) == 0 {
+		return nil, fmt.Errorf("game name cannot be empty")
 	}
 	return &c, nil
 }

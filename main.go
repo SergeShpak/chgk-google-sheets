@@ -18,14 +18,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("[ERR]: %v", err)
 	}
-	// if err := checkOutputDir(parsedFlags); err != nil {
-	// 	log.Fatalf("[ERR]: %v", err)
-	// }
 	app, err := newApp(conf)
 	if err != nil {
 		log.Fatalf("[ERR]: %v", err)
 	}
-	fmt.Println(*app)
+	if err := app.Run(); err != nil {
+		log.Fatalf("[ERR]: error during app run: %v", err)
+	}
 }
 
 func getConfiguration(fl *parsedFlags) (*Config, error) {
