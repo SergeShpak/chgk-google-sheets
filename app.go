@@ -59,10 +59,6 @@ func (a *app) Run() error {
 		if err != nil {
 			return err
 		}
-	} else {
-		if err := a.DeleteGameSpreadsheets(); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -118,53 +114,6 @@ func (a *app) linkManagerTeams(gameSheets *gameSpreadsheets) error {
 	return nil
 }
 
-func (a *app) createLinkManagerTeamsGroups(gameSheets *gameSpreadsheets) ([]*sheets.ValueRange, error) {
-	if len(a.config.Teams) == 0 || (a.config.NumberOfQuestions < 0 && !a.config.HasWarmUpQuestion) {
-		return nil, nil
-	}
-	groups := make([]*sheets.ValueRange, 0)
-	createGroupFn := func(length int) error {
-		r, err := a.getLinkRange(len(groups), length)
-		if err != nil {
-			return err
-		}
-		values := make([][]interface{}, length)
-		currTeamRow := 2 + 3*len(groups)
-		for i := 0; i < length; i++ {
-			currColumn := int('A') + i
-			values[i] = make([]interface{}, len(a.config.Teams))
-			for j := 0; j < len(a.config.Teams); j++ {
-				values[i][j] = fmt.Sprintf("=IMPORTRANGE(\"%s\", \"Sheet1!%c%d\")", gameSheets.teams[a.config.Teams[j]].SpreadsheetUrl, rune(currColumn), currTeamRow)
-			}
-		}
-		g := &sheets.ValueRange{
-			MajorDimension: "COLUMNS",
-			Range:          r,
-			Values:         values,
-		}
-		groups = append(groups, g)
-		return nil
-	}
-	if a.config.HasWarmUpQuestion {
-		if err := createGroupFn(1); err != nil {
-			return nil, err
-		}
-	}
-	quot := a.config.NumberOfQuestions / 12
-	for i := 0; i < quot; i++ {
-		if err := createGroupFn(12); err != nil {
-			return nil, err
-		}
-	}
-	rem := a.config.NumberOfQuestions % 12
-	if rem != 0 {
-		if err := createGroupFn(rem); err != nil {
-			return nil, err
-		}
-	}
-	return groups, nil
-}
-
 func (a *app) getLinkRange(offset int, length int) (string, error) {
 	if length > 24 {
 		return "", fmt.Errorf("group length must be inferior to 25")
@@ -209,16 +158,79 @@ func (a *app) fillTeamSpreadsheet(team *sheets.Spreadsheet) error {
 	return nil
 }
 
+func (a *app) createManagerAnswerGroups() ([]*sheets.ValueRange, error) {
+	if len(a.config.Teams) == 0 || (a.config.NumberOfQuestions < 0 && !a.config.HasWarmUpQuestion) {
+		return nil, nil
+	}
+	teamsCol := make([]interface{}, len(a.config.Teams)+1)
+	teamsCol[0] = "Teams"
+	for i, team := range a.config.Teams {
+		teamsCol[i+1] = team
+	}
+	groups, err := a.createGroups(func(length int, currQuestionIndex int, groups []*sheets.ValueRange) ([]*sheets.ValueRange, error) {
+		r, err := a.getManagerRange(len(groups), length)
+		if err != nil {
+			return nil, err
+		}
+		values := make([][]interface{}, length+1)
+		values[0] = teamsCol
+		for j := 1; j < length+1; j++ {
+			values[j] = []interface{}{currQuestionIndex + j}
+		}
+		g := &sheets.ValueRange{
+			MajorDimension: "COLUMNS",
+			Range:          r,
+			Values:         values,
+		}
+		groups = append(groups, g)
+		return groups, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
+func (a *app) createLinkManagerTeamsGroups(gameSheets *gameSpreadsheets) ([]*sheets.ValueRange, error) {
+	if len(a.config.Teams) == 0 || (a.config.NumberOfQuestions < 0 && !a.config.HasWarmUpQuestion) {
+		return nil, nil
+	}
+	groups, err := a.createGroups(func(length int, currQuestionIndex int, groups []*sheets.ValueRange) ([]*sheets.ValueRange, error) {
+		r, err := a.getLinkRange(len(groups), length)
+		if err != nil {
+			return nil, err
+		}
+		values := make([][]interface{}, length)
+		currTeamRow := 2 + 3*len(groups)
+		for i := 0; i < length; i++ {
+			currColumn := int('A') + i
+			values[i] = make([]interface{}, len(a.config.Teams))
+			for j := 0; j < len(a.config.Teams); j++ {
+				values[i][j] = fmt.Sprintf("=IMPORTRANGE(\"%s\", \"Sheet1!%c%d\")", gameSheets.teams[a.config.Teams[j]].SpreadsheetUrl, rune(currColumn), currTeamRow)
+			}
+		}
+		g := &sheets.ValueRange{
+			MajorDimension: "COLUMNS",
+			Range:          r,
+			Values:         values,
+		}
+		groups = append(groups, g)
+		return groups, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
 func (a *app) createTeamAnswerGroups() ([]*sheets.ValueRange, error) {
 	if a.config.NumberOfQuestions < 0 && !a.config.HasWarmUpQuestion {
 		return nil, nil
 	}
-	groups := make([]*sheets.ValueRange, 0)
-	currQuestionIndex := -1
-	createGroupFn := func(length int) error {
+	groups, err := a.createGroups(func(length int, currQuestionIndex int, groups []*sheets.ValueRange) ([]*sheets.ValueRange, error) {
 		r, err := a.getTeamRange(len(groups), length)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		values := make([][]interface{}, 2)
 		values[0] = make([]interface{}, length)
@@ -232,24 +244,10 @@ func (a *app) createTeamAnswerGroups() ([]*sheets.ValueRange, error) {
 			Values:         values,
 		}
 		groups = append(groups, g)
-		return nil
-	}
-	if a.config.HasWarmUpQuestion {
-		if err := createGroupFn(1); err != nil {
-			return nil, err
-		}
-	}
-	quot := a.config.NumberOfQuestions / 12
-	for i := 0; i < quot; i++ {
-		if err := createGroupFn(12); err != nil {
-			return nil, err
-		}
-	}
-	rem := a.config.NumberOfQuestions % 12
-	if rem != 0 {
-		if err := createGroupFn(rem); err != nil {
-			return nil, err
-		}
+		return groups, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return groups, nil
 }
@@ -266,53 +264,30 @@ func (a *app) getTeamRange(offset int, length int) (string, error) {
 	return r, nil
 }
 
-func (a *app) createManagerAnswerGroups() ([]*sheets.ValueRange, error) {
-	if len(a.config.Teams) == 0 || (a.config.NumberOfQuestions < 0 && !a.config.HasWarmUpQuestion) {
-		return nil, nil
-	}
-	teamsCol := make([]interface{}, len(a.config.Teams)+1)
-	teamsCol[0] = "Teams"
-	for i, team := range a.config.Teams {
-		teamsCol[i+1] = team
-	}
+func (a *app) createGroups(createGroupFn func(length int, currQuestionIndex int, groups []*sheets.ValueRange) ([]*sheets.ValueRange, error)) ([]*sheets.ValueRange, error) {
 	groups := make([]*sheets.ValueRange, 0)
+	var err error
 	currQuestionIndex := -1
-	createGroupFn := func(length int) error {
-		r, err := a.getManagerRange(len(groups), length)
-		if err != nil {
-			return err
-		}
-		values := make([][]interface{}, length+1)
-		values[0] = teamsCol
-		for j := 1; j < length+1; j++ {
-			values[j] = []interface{}{currQuestionIndex + j}
-		}
-		currQuestionIndex += length
-		g := &sheets.ValueRange{
-			MajorDimension: "COLUMNS",
-			Range:          r,
-			Values:         values,
-		}
-		groups = append(groups, g)
-		return nil
-	}
 	if a.config.HasWarmUpQuestion {
-		if err := createGroupFn(1); err != nil {
+		if groups, err = createGroupFn(1, currQuestionIndex, groups); err != nil {
 			return nil, err
 		}
 	}
+	currQuestionIndex++
 	quot := a.config.NumberOfQuestions / 12
 	for i := 0; i < quot; i++ {
-		if err := createGroupFn(12); err != nil {
+		if groups, err = createGroupFn(12, currQuestionIndex, groups); err != nil {
 			return nil, err
 		}
+		currQuestionIndex += 12
 	}
 	rem := a.config.NumberOfQuestions % 12
 	if rem != 0 {
-		if err := createGroupFn(rem); err != nil {
+		if groups, err = createGroupFn(rem, currQuestionIndex, groups); err != nil {
 			return nil, err
 		}
 	}
+	currQuestionIndex += rem
 	return groups, nil
 }
 
@@ -326,42 +301,6 @@ func (a *app) getManagerRange(offset int, length int) (string, error) {
 	endColumn := startColumn + length
 	r := fmt.Sprintf("%c%d:%c%d", rune(startColumn), startRow, rune(endColumn), endRow)
 	return r, nil
-}
-
-func (a *app) DeleteGameSpreadsheets() error {
-	storeSheets, err := a.bolt.getSpreadsheets()
-	if err != nil {
-		return err
-	}
-	if storeSheets.manager != nil {
-		if err := a.deleteSpreadsheet(storeSheets.manager.ID); err != nil {
-			return fmt.Errorf("failed to delete the manager spreadsheet %s: %v", storeSheets.manager.URL, err)
-		}
-		log.Println("deleted manager spreadsheet")
-	}
-	for team, sheet := range storeSheets.teams {
-		if err := a.deleteSpreadsheet(sheet.ID); err != nil {
-			return fmt.Errorf("failed to delete the team %s spreadsheet %s: %v", team, sheet.URL, err)
-		}
-		log.Printf("deleted team %s spreadsheet", team)
-	}
-	return nil
-}
-
-func (a *app) deleteSpreadsheet(sheetID string) error {
-	_, err := a.service.Spreadsheets.BatchUpdate(sheetID, &sheets.BatchUpdateSpreadsheetRequest{
-		Requests: []*sheets.Request{
-			&sheets.Request{
-				DeleteSheet: &sheets.DeleteSheetRequest{
-					SheetId: 0,
-				},
-			},
-		},
-	}).Do()
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func (a *app) createManagerSpreadsheet() (*sheets.Spreadsheet, error) {
