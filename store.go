@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 
 	bolt "go.etcd.io/bbolt"
 	"google.golang.org/api/sheets/v4"
@@ -12,6 +14,7 @@ import (
 const (
 	bucketGameConfiguration = "game-configuration"
 	bucketTeamsSpreadsheets = "teams-spreadsheets"
+	bucketGameResults       = "game-results"
 )
 
 const (
@@ -56,6 +59,15 @@ func newStoreGameSpreadsheets(sheets *gameSpreadsheets) *storeGameSpreadsheets {
 		storeSheets.teams[team] = newStoreSpreadsheet(sheet)
 	}
 	return storeSheets
+}
+
+func (s *storeGameSpreadsheets) String() string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("manager: %s\n", s.manager.URL))
+	for team, sheet := range s.teams {
+		sb.WriteString(fmt.Sprintf("team %s: %s\n", team, sheet.URL))
+	}
+	return sb.String()
 }
 
 func (b *boltManager) saveSpreadsheets(req *storeGameSpreadsheets) error {
@@ -133,6 +145,95 @@ func (b *boltManager) getSpreadsheets() (*storeGameSpreadsheets, error) {
 	return spreadsheets, nil
 }
 
+type ResponseStatus int
+
+const (
+	ResponseStatusOK ResponseStatus = iota + 1
+	ResponseStatusKO
+	ResponseStatusInQuestion
+	ResponseStatusNotChecked
+)
+
+func (s ResponseStatus) String() string {
+	switch s {
+	case ResponseStatusOK:
+		return "+"
+	case ResponseStatusKO:
+		return "-"
+	case ResponseStatusInQuestion:
+		return "?"
+	case ResponseStatusNotChecked:
+		return "{}"
+	default:
+		return fmt.Sprintf("unexpected status %d", s)
+	}
+}
+
+type roundResponse struct {
+	Response string
+	Status   ResponseStatus
+}
+
+type roundResults struct {
+	Round   int
+	Results map[string]*roundResponse
+}
+
+func (r *roundResults) String() string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Round %d results:\n", r.Round))
+	for team, result := range r.Results {
+		sb.WriteString(fmt.Sprintf("\t team %s: %s\t%v\n", team, result.Response, result.Status))
+	}
+	return sb.String()
+}
+
+func (b *boltManager) saveRoundResults(req *roundResults) error {
+	err := b.update(func(tx *bolt.Tx) error {
+		buckGameResults, err := getBucket(tx, bucketGameResults)
+		if err != nil {
+			return err
+		}
+		results, err := json.Marshal(req)
+		if err != nil {
+			return err
+		}
+		if err := buckGameResults.Put([]byte(strconv.Itoa(req.Round)), results); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (b *boltManager) getRoundResults(round int) (*roundResults, error) {
+	roundResults := &roundResults{}
+	err := b.read(func(tx *bolt.Tx) error {
+		buckGameResults, err := getBucket(tx, bucketGameResults)
+		if err != nil {
+			if _, ok := err.(*errorInexistantBucket); ok {
+				return nil
+			}
+			return err
+		}
+		results := buckGameResults.Get([]byte(strconv.Itoa(round)))
+		if len(results) == 0 {
+			return fmt.Errorf("round %d results are not found", round)
+		}
+		if err := json.Unmarshal(results, roundResults); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return roundResults, nil
+}
+
 func (b *boltManager) update(fn func(tx *bolt.Tx) error) error {
 	db, err := bolt.Open(b.dbFile, 0600, nil)
 	if err != nil {
@@ -173,7 +274,7 @@ func (b *boltManager) read(fn func(tx *bolt.Tx) error) error {
 }
 
 func createBuckets(tx *bolt.Tx) error {
-	buckets := []string{bucketGameConfiguration, bucketTeamsSpreadsheets}
+	buckets := []string{bucketGameConfiguration, bucketTeamsSpreadsheets, bucketGameResults}
 	for _, buck := range buckets {
 		if _, err := tx.CreateBucketIfNotExists([]byte(buck)); err != nil {
 			return err

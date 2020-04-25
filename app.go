@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"log"
 	"os"
 	"path"
+	"strconv"
+	"strings"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -60,7 +63,194 @@ func (a *app) Run() error {
 			return err
 		}
 	}
+	for {
+		fmt.Print("Enter command: ")
+		reader := bufio.NewReader(os.Stdin)
+		cmdStr, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("failed to scan the command: %v", err)
+		}
+		cmdStr = cmdStr[:len(cmdStr)-1]
+		fmt.Println()
+		cmdErr := func(cmd string, err error) error {
+			return fmt.Errorf("command \"%s\" failed: %v", cmd, err)
+		}
+		switch cmd := getCommand(cmdStr); cmd {
+		case "listURLs":
+			if err := a.CmdListURLs(); err != nil {
+				return cmdErr(cmdStr, err)
+			}
+		case "fetch":
+			if err := a.CmdFetchResults(cmdStr); err != nil {
+				return cmdErr(cmdStr, err)
+			}
+		case "get":
+			if err := a.CmdGetResults(cmdStr); err != nil {
+				return cmdErr(cmdStr, err)
+			}
+		case "check":
+			if err := a.CmdCheckResults(cmdStr); err != nil {
+				return cmdErr(cmdStr, err)
+			}
+		case "total":
+			if err := a.CmdGetTotal(); err != nil {
+				return cmdErr(cmdStr, err)
+			}
+		case "exit":
+			return nil
+		default:
+			if len(cmd) == 0 {
+				fmt.Printf("got an empty command\n")
+				continue
+			}
+			fmt.Printf("unknown command: %s\n", cmd)
+			continue
+		}
+	}
+}
+
+func (a *app) CmdListURLs() error {
+	sheets, err := a.GetGameSpreadsheets()
+	if err != nil {
+		return err
+	}
+	fmt.Println(sheets)
 	return nil
+}
+
+func (a *app) CmdGetTotal() error {
+	var firstInd int
+	if a.config.HasWarmUpQuestion {
+		firstInd = 1
+	}
+	total := make(map[string]int)
+	for _, team := range a.config.Teams {
+		total[team] = 0
+	}
+	for i := firstInd; i < a.config.NumberOfQuestions; i++ {
+		results, err := a.bolt.getRoundResults(i)
+		if err != nil {
+			if err.Error() == fmt.Sprintf("round %d results are not found", i) {
+				continue
+			}
+			return err
+		}
+		for team, res := range results.Results {
+			if _, ok := total[team]; !ok {
+				return fmt.Errorf("team %s is unknown", team)
+			}
+			if res.Status == ResponseStatusOK {
+				total[team]++
+			}
+		}
+	}
+	for team, count := range total {
+		fmt.Printf("Team %s: %d\n", team, count)
+	}
+	return nil
+}
+
+func (a *app) CmdFetchResults(cmdStr string) error {
+	round, err := getRoundNumber(cmdStr)
+	if err != nil {
+		return fmt.Errorf("failed to parse fetchResp request: %v", err)
+	}
+	results, err := a.fetchRoundResults(round)
+	if err != nil {
+		return fmt.Errorf("failed to fetch round results: %v", err)
+	}
+	resultsToStore := make(map[string]*roundResponse)
+	for team, resp := range results {
+		resultsToStore[team] = &roundResponse{
+			Response: resp,
+			Status:   ResponseStatusNotChecked,
+		}
+	}
+	storeReq := &roundResults{
+		Round:   round,
+		Results: resultsToStore,
+	}
+	if err := a.bolt.saveRoundResults(storeReq); err != nil {
+		return fmt.Errorf("failed to store round results: %v", err)
+	}
+	fmt.Println(storeReq)
+	return nil
+}
+
+//TODO: refactor as two calls: to get round results and to store round results
+func (a *app) CmdCheckResults(cmdStr string) error {
+	round, err := getRoundNumber(cmdStr)
+	if err != nil {
+		return fmt.Errorf("failed to parse check request: %v", err)
+	}
+	results, err := a.bolt.getRoundResults(round)
+	if err != nil {
+		return err
+	}
+	if err := checkResults(results); err != nil {
+		return err
+	}
+	if err := a.bolt.saveRoundResults(results); err != nil {
+		return fmt.Errorf("failed to store round results: %v", err)
+	}
+	return nil
+}
+
+func checkResults(results *roundResults) error {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Printf("Checking results for the round %d\n", results.Round)
+	for team, result := range results.Results {
+		fmt.Printf("Team %s, response: %s, previous status: %v\n", team, result.Response, result.Status)
+		for {
+			statusStr, err := reader.ReadString('\n')
+			if err != nil {
+				return fmt.Errorf("failed to scan the command: %v", err)
+			}
+			statusStr = statusStr[:len(statusStr)-1]
+
+			switch statusStr {
+			case "+":
+				results.Results[team].Status = ResponseStatusOK
+			case "-":
+				results.Results[team].Status = ResponseStatusKO
+			case "?":
+				results.Results[team].Status = ResponseStatusInQuestion
+			case "":
+				results.Results[team].Status = ResponseStatusNotChecked
+			default:
+				fmt.Println("Unknown status, try again")
+				continue
+			}
+			break
+		}
+	}
+	return nil
+}
+
+func (a *app) CmdGetResults(cmdStr string) error {
+	round, err := getRoundNumber(cmdStr)
+	if err != nil {
+		return fmt.Errorf("failed to parse fetch request: %v", err)
+	}
+	roundResults, err := a.bolt.getRoundResults(round)
+	if err != nil {
+		return err
+	}
+	fmt.Println(roundResults)
+	return nil
+}
+
+func getRoundNumber(cmdStr string) (int, error) {
+	sSplitted := strings.Split(cmdStr, " ")
+	if len(sSplitted) != 2 {
+		return 0, fmt.Errorf("expected 1 argument, got %d", len(sSplitted)-1)
+	}
+	roundNumberStr := sSplitted[1]
+	round64, err := strconv.ParseInt(roundNumberStr, 0, 0)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse argument %s as a round number: %v", roundNumberStr, err)
+	}
+	return int(round64), nil
 }
 
 func (a *app) CreateGameSpreadsheets() (*gameSpreadsheets, error) {
@@ -81,6 +271,14 @@ func (a *app) CreateGameSpreadsheets() (*gameSpreadsheets, error) {
 		return nil, err
 	}
 	return sheets, err
+}
+
+func (a *app) GetGameSpreadsheets() (*storeGameSpreadsheets, error) {
+	spreadsheets, err := a.bolt.getSpreadsheets()
+	if err != nil {
+		return nil, err
+	}
+	return spreadsheets, nil
 }
 
 func (a *app) fillGameSheets(sheets *gameSpreadsheets) error {
@@ -147,6 +345,10 @@ func (a *app) fillTeamSpreadsheet(team *sheets.Spreadsheet) error {
 	if err != nil {
 		return err
 	}
+	ranges, err := a.getTeamAnswerGridRanges()
+	if err != nil {
+		return err
+	}
 	valuesService := sheets.NewSpreadsheetsValuesService(a.service)
 	_, err = valuesService.BatchUpdate(team.SpreadsheetId, &sheets.BatchUpdateValuesRequest{
 		ValueInputOption: "USER_ENTERED",
@@ -155,6 +357,25 @@ func (a *app) fillTeamSpreadsheet(team *sheets.Spreadsheet) error {
 	if err != nil {
 		return err
 	}
+	updateBordersRequests := make([]*sheets.Request, len(ranges))
+	border := &sheets.Border{
+		Style: "SOLID",
+	}
+	for i, r := range ranges {
+		updateBordersRequests[i] = &sheets.Request{
+			UpdateBorders: &sheets.UpdateBordersRequest{
+				Range:  r,
+				Bottom: border,
+				Top:    border,
+				Left:   border,
+				Right:  border,
+			},
+		}
+	}
+	spreadsheetsService := sheets.NewSpreadsheetsService(a.service)
+	_, err = spreadsheetsService.BatchUpdate(team.SpreadsheetId, &sheets.BatchUpdateSpreadsheetRequest{
+		Requests: updateBordersRequests,
+	}).Do()
 	return nil
 }
 
@@ -252,6 +473,57 @@ func (a *app) createTeamAnswerGroups() ([]*sheets.ValueRange, error) {
 	return groups, nil
 }
 
+func (a *app) getTeamAnswerGridRanges() ([]*sheets.GridRange, error) {
+	if a.config.NumberOfQuestions < 0 && !a.config.HasWarmUpQuestion {
+		return nil, nil
+	}
+	questionsGroupLength := 12
+	questionGroupsCount := a.config.NumberOfQuestions / questionsGroupLength
+	if a.config.NumberOfQuestions%questionsGroupLength != 0 {
+		questionGroupsCount++
+	}
+	rangesCount := questionGroupsCount
+	if a.config.HasWarmUpQuestion {
+		rangesCount++
+	}
+	ranges := make([]*sheets.GridRange, 0, rangesCount)
+	rowOffset := 0
+	gapWidth := 1
+	groupWidth := 2
+	if a.config.HasWarmUpQuestion {
+		warmupGridRange := &sheets.GridRange{
+			StartColumnIndex: 0,
+			EndColumnIndex:   1,
+			StartRowIndex:    0,
+			EndRowIndex:      2,
+		}
+		ranges = append(ranges, warmupGridRange)
+		rowOffset += gapWidth + groupWidth
+	}
+	for i := 0; i < questionGroupsCount-1; i++ {
+		r := &sheets.GridRange{
+			StartColumnIndex: 0,
+			EndColumnIndex:   int64(questionsGroupLength),
+			StartRowIndex:    int64(rowOffset),
+			EndRowIndex:      int64(rowOffset + groupWidth),
+		}
+		ranges = append(ranges, r)
+		rowOffset += gapWidth + groupWidth
+	}
+	lastRangeLen := questionsGroupLength
+	if a.config.NumberOfQuestions%questionsGroupLength != 0 {
+		lastRangeLen = a.config.NumberOfQuestions % questionsGroupLength
+	}
+	r := &sheets.GridRange{
+		StartColumnIndex: 0,
+		EndColumnIndex:   int64(lastRangeLen),
+		StartRowIndex:    int64(rowOffset),
+		EndRowIndex:      int64(rowOffset + groupWidth),
+	}
+	ranges = append(ranges, r)
+	return ranges, nil
+}
+
 func (a *app) getTeamRange(offset int, length int) (string, error) {
 	if length > 25 {
 		return "", fmt.Errorf("group length must be inferior to 25")
@@ -322,7 +594,7 @@ func (a *app) createTeamsSpreadsheets() (map[string]*sheets.Spreadsheet, error) 
 	for _, team := range a.config.Teams {
 		sheet := &sheets.Spreadsheet{
 			Properties: &sheets.SpreadsheetProperties{
-				Title: fmt.Sprintf("%s-team-%s", a.config.GameName, team),
+				Title: fmt.Sprintf("%s: команда %s", a.config.GameName, team),
 			},
 		}
 		createdSpreadsheet, err := a.service.Spreadsheets.Create(sheet).Do()
@@ -333,6 +605,87 @@ func (a *app) createTeamsSpreadsheets() (map[string]*sheets.Spreadsheet, error) 
 		teamsSpreadsheets[team] = createdSpreadsheet
 	}
 	return teamsSpreadsheets, nil
+}
+
+func (a *app) fetchRoundResults(round int) (map[string]string, error) {
+	gameSpreadsheets, err := a.GetGameSpreadsheets()
+	if err != nil {
+		return nil, err
+	}
+	roundRange, err := a.getRoundRange(round)
+	if err != nil {
+		return nil, err
+	}
+	valuesService := sheets.NewSpreadsheetsValuesService(a.service)
+	resp, err := valuesService.BatchGetByDataFilter(gameSpreadsheets.manager.ID, &sheets.BatchGetValuesByDataFilterRequest{
+		DataFilters: []*sheets.DataFilter{
+			&sheets.DataFilter{
+				GridRange: roundRange,
+			},
+		},
+		MajorDimension: "COLUMNS",
+	}).Do()
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.ValueRanges) != 1 {
+		return nil, fmt.Errorf("unexpected response value range length: %d", len(resp.ValueRanges))
+	}
+	log.Println(resp.ValueRanges[0].ValueRange)
+	if len(resp.ValueRanges[0].ValueRange.Values) != 1 {
+		return nil, fmt.Errorf("unexpected length of ValueRange values: %d", len(resp.ValueRanges[0].ValueRange.Values))
+	}
+	resultsIface := resp.ValueRanges[0].ValueRange.Values[0]
+	results := make(map[string]string, len(resultsIface))
+	for i, r := range resultsIface {
+		rStr, ok := r.(string)
+		if !ok {
+			return nil, fmt.Errorf("received value %v could not be cast to string", r)
+		}
+		results[a.config.Teams[i]] = rStr
+	}
+	return results, nil
+}
+
+func (a *app) getRoundRange(round int) (*sheets.GridRange, error) {
+	if round < 0 || round >= a.config.NumberOfQuestions {
+		return nil, fmt.Errorf("round %d is out of range [0; %d]", round, a.config.NumberOfQuestions)
+	}
+	if round == 0 {
+		if !a.config.HasWarmUpQuestion {
+			return nil, fmt.Errorf("round %d is invalid as the game does not have a warm-up question", round)
+		}
+		gr := &sheets.GridRange{
+			StartRowIndex:    1,
+			EndRowIndex:      int64(len(a.config.Teams)) + 1,
+			StartColumnIndex: 1,
+			EndColumnIndex:   2,
+		}
+		log.Printf("getting the grid range: %+v\n", gr)
+		return gr, nil
+	}
+	groupWidth := 1 + len(a.config.Teams)
+	gapWidth := 1
+	firstGroupRow := 0
+	if a.config.HasWarmUpQuestion {
+		firstGroupRow += groupWidth + gapWidth
+	}
+	questionsCountInGroup := 12
+	groupIndex := round / questionsCountInGroup
+	groupRow := firstGroupRow + groupIndex*(groupWidth+gapWidth)
+	firstResultRow := groupRow + 1
+	lastResultRow := groupRow + len(a.config.Teams)
+	questionMod := round % questionsCountInGroup
+	if questionMod == 0 {
+		questionMod = questionsCountInGroup
+	}
+	gr := &sheets.GridRange{
+		StartRowIndex:    int64(firstResultRow),
+		EndRowIndex:      int64(lastResultRow + 1),
+		StartColumnIndex: int64(questionMod),
+		EndColumnIndex:   int64(questionMod + 1),
+	}
+	return gr, nil
 }
 
 func getOauth2Token(credsFile string, outputDir string) (*oauth2.Token, *oauth2.Config, error) {
@@ -436,4 +789,12 @@ func checkOutputDir(isNewGame bool, outputDir string) error {
 		return fmt.Errorf("cannot use a non-empty output directory %s to create a game", outputDir)
 	}
 	return nil
+}
+
+func getCommand(s string) string {
+	sSplitted := strings.Split(s, " ")
+	if len(sSplitted) == 0 {
+		return ""
+	}
+	return sSplitted[0]
 }

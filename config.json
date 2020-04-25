@@ -1,6 +1,6 @@
 {
-  "GameName": "own-game",
-  "NumberOfQuestions": 41,
-  "HasWarmUpQuestion": true,
-  "Teams": ["TeamA", "TeamB"]
+  "GameName": "Синхрон-lite. Выпуск XXIV",
+  "NumberOfQuestions": 36,
+  "HasWarmUpQuestion": false,
+  "Teams": ["Читал Бальзака", "Пока все дома"]
 }
